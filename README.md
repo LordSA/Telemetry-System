@@ -1,47 +1,94 @@
 # The Overseer: Telemetry System
 
-The Grand Vision: To build a standalone, engine-agnostic telemetry software that runs silently in the background, archiving game data for analysis.
+The Overseer is a standalone, engine-agnostic telemetry suite designed to collect, archive, and visualize data from game clients silently and efficiently.
 
-## Repository Structure
+## 🚀 Key Features
 
-The project is organized into following components:
+*   **Engine-Agnostic**: Simple HTTP API for Java, Godot, Unity, and more.
+*   **Persistent Tracking**: Automated tracking of career playtime and session durations.
+*   **Cloud Persistence**: Handles game save uploads with stat synchronization.
+*   **Playtime Leaderboards**: Integrated leaderboard endpoint for engagement tracking.
+*   **Heatmap Visualization**: Generate detailed spatial activity maps (Heatmaps) from stored event data.
 
-- **`backend/`**: The Python server (FastAPI-style behavior using `http.server`).
-  - Port: `8090` (Default)
-  - Config: Controlled via `.env` file.
-  
-- **`clients/`**: Client-side integrations.
-  - **`java/`**: A Maven project for Java applications (LibGDX, LWJGL, etc.).
-  
-- **`database/`**: SQL storage.
-  - Contains `schema.sql` for MySQL database setup.
-  
-- **`visualizer/`**: Data analysis and heatmap generation.
-  - Generates heatmaps (PNG images) from event data.
+---
 
-## Getting Started
+## 📂 Repository Structure
 
-### 1. Database Setup
-Ensure MySQL is running and execute:
-```bash
+```text
+/
+├── .env                # Global configuration (Single Source of Truth)
+├── var.py              # Shared configuration module for Python components
+├── backend/            # Python telemetry server (Overseer)
+├── clients/
+│   └── java/           # Maven-compliant Java client implementation
+├── database/           # MySQL schema and storage logic
+├── visualizer/         # Spatial data analysis and heatmap generator
+└── requirements.txt    # Common Python dependencies
+```
+
+---
+
+## ⚙️ Configuration Variables
+
+Centralize your settings in the root `.env` file. These variables are managed by `var.py` and used by both the backend and visualizer.
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `DB_HOST` | Hostname of your MySQL server | `localhost` |
+| `DB_NAME` | Name of the telemetry database | `telemetry_db` |
+| `DB_USER` | MySQL user with table permissions | `root` |
+| `DB_PASSWORD` | Password for your MySQL database | (Required) |
+| `SERVER_PORT` | Port the Overseer listens on | `8090` |
+| `VISUALIZER_OUTPUT_DIR` | Output directory for generated PNGs | `output` |
+| `VISUALIZER_DEFAULT_EVENT`| Default event type for visualization | `PLAYER_DEATH` |
+
+---
+
+## 🛠️ Getting Started
+
+### 1. Environment Setup (The "venv" Thing)
+It is highly recommended to use a Python virtual environment to keep your global packages clean.
+
+**Window Setup:**
+```powershell
+# Create the environment
+python -m venv venv
+
+# Activate the environment (DO THIS EVERY TIME YOU START WORKING)
+.\venv\Scripts\activate
+
+# Install all necessary libraries
+pip install -r requirements.txt
+```
+
+### 2. Configuration
+Copy the template and fill in your MySQL credentials:
+```powershell
+cp .env.example .env
+```
+
+### 3. Database Initialization
+Ensure MySQL is running and execute the schema:
+```powershell
 mysql -u root -p < database/schema.sql
 ```
 
-### 2. Backend (Overseer)
-Navigate to `backend/`, configure the `.env` file and install dependencies:
-```bash
-pip install -r ../requirements.txt
+### 4. Running the Backend
+Overseer will initialize tables and start listening for data:
+```powershell
+cd backend
 python server.py
 ```
 
-### 3. Visualizer
-Navigate to `visualizer/` and generate a heatmap:
-```bash
+### 5. Running the Visualizer
+Generate heatmaps of player deaths or stealth breakage:
+```powershell
+cd visualizer
 python generator.py --event PLAYER_DEATH
 ```
 
-### 4. Java Client
-Build the telemetry library:
+### 6. Java Client Integration
+Build the standard library for your project:
 ```bash
 cd clients/java
 mvn clean install
