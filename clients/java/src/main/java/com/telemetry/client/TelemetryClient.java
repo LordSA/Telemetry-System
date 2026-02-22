@@ -1,8 +1,10 @@
+package com.telemetry.client;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.io.OutputStream;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -11,14 +13,14 @@ import java.util.concurrent.Executors;
 /**
  * TelemetryClient - The Silent Observer
  * 
- * Tracks player behavior and sends data to the Overseer server.
+ * Tracks player death events and sends data to the Overseer server.
  * All operations are asynchronous and fire-and-forget.
  * 
  * Usage:
- * 1. Call TelemetryClient.initialize() when game starts
- * 2. Call event methods (onPlayerDeath, onStealthBroken, etc.) in your game
- * code
- * 3. Call TelemetryClient.shutdown() when game closes
+ * 1. Call TelemetryClient.register() to register/login the player
+ * 2. Call TelemetryClient.startSession() when a play session begins
+ * 3. Call TelemetryClient.onPlayerDeath() when the player dies
+ * 4. Call TelemetryClient.endSession() when the session ends
  */
 public class TelemetryClient {
 
@@ -29,190 +31,288 @@ public class TelemetryClient {
     private static final int TIMEOUT_MS = 2000;
 
     // ========================================================================
-    // EVENT TYPES - Must match server's EventType class
-    // ========================================================================
-    public static final String EVENT_STEALTH_BROKEN = "STEALTH_BROKEN";
-    public static final String EVENT_PLAYER_DEATH = "PLAYER_DEATH";
-    public static final String EVENT_ITEM_USED = "ITEM_USED";
-    public static final String EVENT_LEVEL_COMPLETE = "LEVEL_COMPLETE";
-    public static final String EVENT_ENEMY_ALERT = "ENEMY_ALERT";
-    public static final String EVENT_CHECKPOINT = "CHECKPOINT";
-    public static final String EVENT_DAMAGE_TAKEN = "DAMAGE_TAKEN";
-    
-
-    // ========================================================================
     // STATE
     // ========================================================================
-    private static String sessionId = null;
-    private static String userId = null;
+    private static int sessionId = -1;
+    private static int playerId = -1;
+    private static int saveId = -1;
     private static ExecutorService executor = null;
     private static boolean initialized = false;
 
+    private static final ConcurrentLinkedQueue<String> deathQueue = new ConcurrentLinkedQueue<>();
     private static final ConcurrentLinkedQueue<String> eventQueue = new ConcurrentLinkedQueue<>();
     private static final int BATCH_SIZE = 15;
+
     // ========================================================================
-    // INITIALIZATION
+    // REGISTRATION & SESSION
     // ========================================================================
 
     /**
-     * Initialize the telemetry system. Call this when the game boots up.
-     * Generates a unique session ID and registers with the Overseer.
+     * Register a player with the Overseer. Must be called before startSession.
+     * Returns the player_id assigned by the server.
      * 
-     * @param playerId Unique identifier for the player (can be machine ID, save
-     *                 slot, etc.)
+     * @param username Player's unique username
+     * @param password Player's password
      */
+    public static void register(String username, String password) {
+        if (executor == null) {
+            executor = Executors.newSingleThreadExecutor();
+        }
 
-    public static void initialize(String playerId) {
-        if (initialized) {
-            System.out.println("[Telemetry] Already initialized");
+        String payload = String.format(
+                "{\"username\":\"%s\",\"password\":\"%s\"}",
+                username, password);
+
+        // Synchronous so we can capture player_id before proceeding
+        String response = sendSyncWithResponse("/player/register", payload);
+        if (response != null) {
+            // Parse player_id from response JSON (simple extraction)
+            int idIdx = response.indexOf("\"player_id\":");
+            if (idIdx >= 0) {
+                String sub = response.substring(idIdx + 12).trim();
+                StringBuilder num = new StringBuilder();
+                for (char c : sub.toCharArray()) {
+                    if (Character.isDigit(c)) num.append(c);
+                    else break;
+                }
+                if (num.length() > 0) {
+                    playerId = Integer.parseInt(num.toString());
+                }
+            }
+        }
+
+        System.out.println("[Telemetry] Player registered: " + username + " (id=" + playerId + ")");
+    }
+
+    /**
+     * Upload or update a save file for the current player.
+     * 
+     * @param slotNumber     Save slot number
+     * @param completionPct  Completion percentage (0.00 - 100.00)
+     */
+    public static void uploadSave(int slotNumber, float completionPct) {
+        if (playerId < 0) {
+            System.err.println("[Telemetry] Must register before uploading saves");
             return;
         }
 
-        userId = playerId;
-        sessionId = UUID.randomUUID().toString();
-        executor = Executors.newSingleThreadExecutor();
+        String payload = String.format(
+                "{\"player_id\":%d,\"slot_number\":%d,\"completion_pct\":%.2f}",
+                playerId, slotNumber, completionPct);
+
+        String response = sendSyncWithResponse("/save/upload", payload);
+        if (response != null) {
+            int idIdx = response.indexOf("\"save_id\":");
+            if (idIdx >= 0) {
+                String sub = response.substring(idIdx + 10).trim();
+                StringBuilder num = new StringBuilder();
+                for (char c : sub.toCharArray()) {
+                    if (Character.isDigit(c)) num.append(c);
+                    else break;
+                }
+                if (num.length() > 0) {
+                    saveId = Integer.parseInt(num.toString());
+                }
+            }
+        }
+
+        System.out.println("[Telemetry] Save uploaded: slot " + slotNumber + " (save_id=" + saveId + ")");
+    }
+
+    /**
+     * Start a new telemetry session. Call register() first.
+     * Optionally call uploadSave() before this to link the session to a save file.
+     */
+    public static void startSession() {
+        if (playerId < 0) {
+            System.err.println("[Telemetry] Must register before starting session");
+            return;
+        }
+
+        if (initialized) {
+            System.out.println("[Telemetry] Already in a session");
+            return;
+        }
+
+        if (executor == null) {
+            executor = Executors.newSingleThreadExecutor();
+        }
         initialized = true;
 
-        // Register session with Overseer
-        String osInfo = System.getProperty("os.name") + " " + System.getProperty("os.version");
-        String payload = String.format(
-                "{\"session_id\":\"%s\",\"user_id\":\"%s\",\"os_info\":\"%s\"}",
-                sessionId, userId, osInfo);
+        String payload;
+        if (saveId >= 0) {
+            payload = String.format(
+                    "{\"player_id\":%d,\"save_id\":%d}",
+                    playerId, saveId);
+        } else {
+            payload = String.format(
+                    "{\"player_id\":%d}",
+                    playerId);
+        }
 
-        sendAsync("/session/start", payload);
+        String response = sendSyncWithResponse("/session/start", payload);
+        if (response != null) {
+            int idIdx = response.indexOf("\"session_id\":");
+            if (idIdx >= 0) {
+                String sub = response.substring(idIdx + 13).trim();
+                StringBuilder num = new StringBuilder();
+                for (char c : sub.toCharArray()) {
+                    if (Character.isDigit(c)) num.append(c);
+                    else break;
+                }
+                if (num.length() > 0) {
+                    sessionId = Integer.parseInt(num.toString());
+                }
+            }
+        }
+
         System.out.println("[Telemetry] Session started: " + sessionId);
     }
 
     /**
      * Shutdown the telemetry system. Call this when the game closes.
      */
-    public static void shutdown() {
+    public static void endSession() {
         if (!initialized)
             return;
 
+        // Flush remaining queues
+        flushDeathQueue();
+        flushEventQueue();
+
         // End session
-        String payload = String.format("{\"session_id\":\"%s\"}", sessionId);
-        sendSync("/session/end", payload); // Sync to ensure it completes before exit
+        String payload = String.format("{\"session_id\":%d}", sessionId);
+        sendSync("/session/end", payload);
 
         if (executor != null) {
             executor.shutdown();
+            executor = null;
         }
 
         initialized = false;
+        sessionId = -1;
         System.out.println("[Telemetry] Session ended");
     }
 
     // ========================================================================
-    // EVENT TRACKING METHODS - Insert these into your game code
+    // DEATH EVENT TRACKING
     // ========================================================================
-
-    /**
-     * Track when an enemy spots the player (stealth broken).
-     * 
-     * @param x         Player X coordinate
-     * @param y         Player Y coordinate
-     * @param enemyType Type of enemy that spotted the player
-     */
-    public static void onStealthBroken(float x, float y, String enemyType) {
-        sendEvent(EVENT_STEALTH_BROKEN, x, y,
-                String.format("{\"enemy_type\":\"%s\"}", enemyType));
-    }
 
     /**
      * Track player death.
      * 
-     * @param x            Death X coordinate
-     * @param y            Death Y coordinate
-     * @param causeOfDeath What killed the player
+     * @param deathX     Death X coordinate
+     * @param deathY     Death Y coordinate
+     * @param deathCause What killed the player
+     * @param areaCode   Map zone area code (use -1 if unknown)
      */
-    public static void onPlayerDeath(float x, float y, String causeOfDeath) {
-        sendEvent(EVENT_PLAYER_DEATH, x, y,
-                String.format("{\"cause\":\"%s\"}", causeOfDeath));
-    }
-
-    /**
-     * Track item usage (health, distractions, etc.)
-     * 
-     * @param x        Usage X coordinate
-     * @param y        Usage Y coordinate
-     * @param itemType Type of item used
-     */
-    public static void onItemUsed(float x, float y, String itemType) {
-        sendEvent(EVENT_ITEM_USED, x, y,
-                String.format("{\"item_type\":\"%s\"}", itemType));
-    }
-
-    /**
-     * Track level completion.
-     * 
-     * @param x           Exit X coordinate
-     * @param y           Exit Y coordinate
-     * @param levelName   Name of completed level
-     * @param timeSeconds Time taken to complete
-     */
-    public static void onLevelComplete(float x, float y, String levelName, int timeSeconds) {
-        sendEvent(EVENT_LEVEL_COMPLETE, x, y,
-                String.format("{\"level\":\"%s\",\"time_seconds\":%d}", levelName, timeSeconds));
-    }
-
-    /**
-     * Track enemy alert state trigger.
-     * 
-     * @param x         Player X coordinate when alert triggered
-     * @param y         Player Y coordinate when alert triggered
-     * @param enemyType Type of enemy that entered alert
-     */
-    public static void onEnemyAlert(float x, float y, String enemyType) {
-        sendEvent(EVENT_ENEMY_ALERT, x, y,
-                String.format("{\"enemy_type\":\"%s\"}", enemyType));
-    }
-
-    /**
-     * Track checkpoint reached.
-     * 
-     * @param x            Checkpoint X coordinate
-     * @param y            Checkpoint Y coordinate
-     * @param checkpointId Checkpoint identifier
-     */
-    public static void onCheckpoint(float x, float y, String checkpointId) {
-        sendEvent(EVENT_CHECKPOINT, x, y,
-                String.format("{\"checkpoint_id\":\"%s\"}", checkpointId));
-    }
-
-    /**
-     * Track damage taken.
-     * 
-     * @param x            Player X coordinate
-     * @param y            Player Y coordinate
-     * @param damageAmount Amount of damage taken
-     * @param source       What caused the damage
-     */
-    public static void onDamageTaken(float x, float y, int damageAmount, String source) {
-        sendEvent(EVENT_DAMAGE_TAKEN, x, y,
-                String.format("{\"damage\":%d,\"source\":\"%s\"}", damageAmount, source));
-    }
-
-    // ========================================================================
-    // CORE SENDING LOGIC
-    // ========================================================================
-
-    /**
-     * Send a telemetry event to the Overseer.
-     */
-    private static void sendEvent(String eventType, float x, float y, String metaJson) {
+    public static void onPlayerDeath(float deathX, float deathY, String deathCause, int areaCode) {
         if (!initialized)
             return;
-        String payload = String.format(
-                "{\"session_id\":\"%s\",\"event_type\":\"%s\",\"x\":%.2f,\"y\":%.2f,\"meta\":%s}",
-                sessionId, eventType, x, y, metaJson);
-        eventQueue.add(payload);
 
-        if (eventQueue.size() >= BATCH_SIZE) {
-            flushQueue(); // Sends the whole array in one single HTTP request
+        String payload;
+        if (areaCode >= 0) {
+            payload = String.format(
+                    "{\"session_id\":%d,\"area_code\":%d,\"death_x\":%.2f,\"death_y\":%.2f,\"death_cause\":\"%s\"}",
+                    sessionId, areaCode, deathX, deathY, deathCause);
+        } else {
+            payload = String.format(
+                    "{\"session_id\":%d,\"death_x\":%.2f,\"death_y\":%.2f,\"death_cause\":\"%s\"}",
+                    sessionId, deathX, deathY, deathCause);
+        }
+
+        deathQueue.add(payload);
+
+        if (deathQueue.size() >= BATCH_SIZE) {
+            flushDeathQueue();
         }
     }
 
-    private static void flushQueue() {
+    /**
+     * Convenience overload without area code.
+     */
+    public static void onPlayerDeath(float deathX, float deathY, String deathCause) {
+        onPlayerDeath(deathX, deathY, deathCause, -1);
+    }
+
+    // ========================================================================
+    // GENERIC EVENT TRACKING
+    // ========================================================================
+
+    /**
+     * Track a generic player event.
+     *
+     * @param eventType  Event type string (e.g. "ITEM_PICKUP", "CHECKPOINT", "LEVEL_COMPLETE")
+     * @param eventX     Event X coordinate (nullable, pass Float.MIN_VALUE to omit)
+     * @param eventY     Event Y coordinate (nullable, pass Float.MIN_VALUE to omit)
+     * @param eventValue Optional integer value (e.g. score, damage amount; use -1 to omit)
+     * @param areaCode   Map zone area code (use -1 if unknown)
+     */
+    public static void sendEvent(String eventType, float eventX, float eventY, int eventValue, int areaCode) {
+        if (!initialized)
+            return;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("{\"session_id\":%d,\"event_type\":\"%s\"", sessionId, eventType));
+        if (areaCode >= 0) {
+            sb.append(String.format(",\"area_code\":%d", areaCode));
+        }
+        if (eventX != Float.MIN_VALUE) {
+            sb.append(String.format(",\"event_x\":%.2f", eventX));
+        }
+        if (eventY != Float.MIN_VALUE) {
+            sb.append(String.format(",\"event_y\":%.2f", eventY));
+        }
+        if (eventValue >= 0) {
+            sb.append(String.format(",\"event_value\":%d", eventValue));
+        }
+        sb.append("}");
+
+        eventQueue.add(sb.toString());
+
+        if (eventQueue.size() >= BATCH_SIZE) {
+            flushEventQueue();
+        }
+    }
+
+    /**
+     * Convenience: event with coordinates only.
+     */
+    public static void sendEvent(String eventType, float eventX, float eventY) {
+        sendEvent(eventType, eventX, eventY, -1, -1);
+    }
+
+    /**
+     * Convenience: event with coordinates and area code.
+     */
+    public static void sendEvent(String eventType, float eventX, float eventY, int areaCode) {
+        sendEvent(eventType, eventX, eventY, -1, areaCode);
+    }
+
+    // ========================================================================
+    // QUEUE FLUSHING
+    // ========================================================================
+
+    private static void flushDeathQueue() {
+        if (deathQueue.isEmpty())
+            return;
+
+        StringBuilder batch = new StringBuilder("[");
+        String event;
+        boolean first = true;
+
+        while ((event = deathQueue.poll()) != null) {
+            if (!first)
+                batch.append(",");
+            batch.append(event);
+            first = false;
+        }
+        batch.append("]");
+
+        sendAsync("/death/batch", batch.toString());
+    }
+
+    private static void flushEventQueue() {
         if (eventQueue.isEmpty())
             return;
 
@@ -228,25 +328,29 @@ public class TelemetryClient {
         }
         batch.append("]");
 
-        sendAsync("/events/batch", batch.toString());
+        sendAsync("/event/batch", batch.toString());
     }
+
+    // ========================================================================
+    // CORE SENDING LOGIC
+    // ========================================================================
 
     /**
      * Send data asynchronously (fire and forget).
      */
     private static void sendAsync(String endpoint, String jsonPayload) {
         try {
-        if (executor == null || executor.isShutdown())
-            return;
+            if (executor == null || executor.isShutdown())
+                return;
 
-        executor.submit(() -> sendSync(endpoint, jsonPayload));
-    } catch (Exception e) {
-       System.err.println("[Telemetry] Connection failed: " + e.getMessage());
+            executor.submit(() -> sendSync(endpoint, jsonPayload));
+        } catch (Exception e) {
+            System.err.println("[Telemetry] Connection failed: " + e.getMessage());
+        }
     }
-    } 
 
     /**
-     * Send data synchronously (blocks until complete).
+     * Send data synchronously (blocks until complete). No response captured.
      */
     private static void sendSync(String endpoint, String jsonPayload) {
         HttpURLConnection conn = null;
@@ -269,7 +373,6 @@ public class TelemetryClient {
                 System.err.println("[Telemetry] Server returned: " + responseCode);
             }
         } catch (Exception e) {
-            // Silently fail - don't crash the game over telemetry
             System.err.println("[Telemetry] Send failed: " + e.getMessage());
         } finally {
             if (conn != null) {
@@ -279,10 +382,60 @@ public class TelemetryClient {
     }
 
     /**
+     * Send data synchronously and return the response body.
+     */
+    private static String sendSyncWithResponse(String endpoint, String jsonPayload) {
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(OVERSEER_HOST + endpoint);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(TIMEOUT_MS);
+            conn.setReadTimeout(TIMEOUT_MS);
+
+            try (OutputStream os = conn.getOutputStream()) {
+                byte[] input = jsonPayload.getBytes(StandardCharsets.UTF_8);
+                os.write(input, 0, input.length);
+            }
+
+            int responseCode = conn.getResponseCode();
+            if (responseCode == 200) {
+                BufferedReader br = new BufferedReader(
+                        new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
+                StringBuilder response = new StringBuilder();
+                String line;
+                while ((line = br.readLine()) != null) {
+                    response.append(line);
+                }
+                br.close();
+                return response.toString();
+            } else {
+                System.err.println("[Telemetry] Server returned: " + responseCode);
+            }
+        } catch (Exception e) {
+            System.err.println("[Telemetry] Send failed: " + e.getMessage());
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+        return null;
+    }
+
+    /**
      * Get the current session ID (for debugging).
      */
-    public static String getSessionId() {
+    public static int getSessionId() {
         return sessionId;
+    }
+
+    /**
+     * Get the current player ID (for debugging).
+     */
+    public static int getPlayerId() {
+        return playerId;
     }
 
     /**

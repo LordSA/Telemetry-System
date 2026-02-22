@@ -16,17 +16,6 @@ OUTPUT_DIR = var.VISUALIZER_OUTPUT_DIR
 # Database Configuration from common var.py
 DB_CONFIG = var.DB_CONFIG
 
-# Event types matching the server
-EVENT_TYPES = {
-    'STEALTH_BROKEN': {'color': 'Oranges', 'name': 'Stealth Broken'},
-    'PLAYER_DEATH': {'color': 'Reds', 'name': 'Player Deaths'},
-    'ITEM_USED': {'color': 'Blues', 'name': 'Item Usage'},
-    'LEVEL_COMPLETE': {'color': 'Greens', 'name': 'Level Completions'},
-    'ENEMY_ALERT': {'color': 'YlOrRd', 'name': 'Enemy Alerts'},
-    'CHECKPOINT': {'color': 'Purples', 'name': 'Checkpoints'},
-    'DAMAGE_TAKEN': {'color': 'RdPu', 'name': 'Damage Taken'}
-}
-
 
 def connect_db():
     """Connect to the MySQL database."""
@@ -37,8 +26,8 @@ def connect_db():
         return None
 
 
-def fetch_events_by_type(event_type, session_id=None):
-    """Fetch coordinates for a specific event type."""
+def fetch_deaths(area_code=None, session_id=None):
+    """Fetch death coordinates, optionally filtered by area or session."""
     conn = connect_db()
     if not conn or not conn.is_connected():
         return []
@@ -46,15 +35,43 @@ def fetch_events_by_type(event_type, session_id=None):
     try:
         cursor = conn.cursor()
         
-        if session_id:
+        query = "SELECT death_x, death_y FROM deathevent WHERE 1=1"
+        params = []
+
+        if area_code is not None:
+            query += " AND area_code = %s"
+            params.append(area_code)
+        if session_id is not None:
+            query += " AND session_id = %s"
+            params.append(session_id)
+
+        cursor.execute(query, tuple(params))
+        data = [(float(row[0]), float(row[1])) for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        return data
+    except mysql.connector.Error as err:
+        print(f"[ERROR] Fetching deaths: {err}")
+        return []
+
+
+def fetch_death_causes(area_code=None):
+    """Fetch death cause distribution."""
+    conn = connect_db()
+    if not conn or not conn.is_connected():
+        return []
+    
+    try:
+        cursor = conn.cursor()
+        
+        if area_code is not None:
             cursor.execute(
-                "SELECT x_coord, y_coord FROM events WHERE event_type=%s AND session_id=%s",
-                (event_type, session_id)
+                "SELECT death_cause, COUNT(*) as cnt FROM deathevent WHERE area_code=%s GROUP BY death_cause ORDER BY cnt DESC",
+                (area_code,)
             )
         else:
             cursor.execute(
-                "SELECT x_coord, y_coord FROM events WHERE event_type=%s",
-                (event_type,)
+                "SELECT death_cause, COUNT(*) as cnt FROM deathevent GROUP BY death_cause ORDER BY cnt DESC"
             )
         
         data = cursor.fetchall()
@@ -62,11 +79,33 @@ def fetch_events_by_type(event_type, session_id=None):
         conn.close()
         return data
     except mysql.connector.Error as err:
-        print(f"[ERROR] Fetching events: {err}")
+        print(f"[ERROR] Fetching death causes: {err}")
         return []
 
 
-def generate_kde_heatmap(coords, event_type, map_size=(1000, 1000), output_name=None):
+def fetch_mapzones():
+    """Fetch all map zones for overlay context."""
+    conn = connect_db()
+    if not conn or not conn.is_connected():
+        return []
+    
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT area_code, area_name, x_min, y_min, x_max, y_max FROM mapzone")
+        zones = cursor.fetchall()
+        # Convert Decimal to float
+        for z in zones:
+            for key in ('x_min', 'y_min', 'x_max', 'y_max'):
+                z[key] = float(z[key])
+        cursor.close()
+        conn.close()
+        return zones
+    except mysql.connector.Error as err:
+        print(f"[ERROR] Fetching map zones: {err}")
+        return []
+
+
+def generate_kde_heatmap(coords, map_size=(1000, 1000), output_name=None, title='Deaths', cmap='Reds'):
     """
     Generate a Kernel Density Estimation heatmap.
     
@@ -74,16 +113,13 @@ def generate_kde_heatmap(coords, event_type, map_size=(1000, 1000), output_name=
     Output is a transparent PNG that can be overlaid on level maps.
     """
     if not coords or len(coords) < 2:
-        print(f"[WARNING] Not enough data points for {event_type} ({len(coords)} points)")
+        print(f"[WARNING] Not enough data points ({len(coords)} points)")
         return None
     
     x = np.array([c[0] for c in coords])
     y = np.array([c[1] for c in coords])
     
-    # Get event config
-    config = EVENT_TYPES.get(event_type, {'color': 'Reds', 'name': event_type})
-    
-    print(f"[INFO] Generating KDE heatmap for {config['name']} ({len(coords)} points)")
+    print(f"[INFO] Generating KDE heatmap for {title} ({len(coords)} points)")
     
     # Create figure with transparent background
     fig, ax = plt.subplots(figsize=(12, 12))
@@ -112,7 +148,7 @@ def generate_kde_heatmap(coords, event_type, map_size=(1000, 1000), output_name=
         zi = ndimage.gaussian_filter(zi, sigma=2)
         
         # Plot the KDE heatmap
-        im = ax.pcolormesh(xi, yi, zi, shading='gouraud', cmap=config['color'], alpha=0.7)
+        im = ax.pcolormesh(xi, yi, zi, shading='gouraud', cmap=cmap, alpha=0.7)
         
         # Also scatter the actual points (semi-transparent)
         ax.scatter(x, y, c='white', s=20, alpha=0.3, edgecolors='none')
@@ -120,7 +156,7 @@ def generate_kde_heatmap(coords, event_type, map_size=(1000, 1000), output_name=
     except np.linalg.LinAlgError:
         # Fallback to histogram if KDE fails (e.g., colinear points)
         print(f"[WARNING] KDE failed, falling back to histogram")
-        ax.hist2d(x, y, bins=30, cmap=config['color'], alpha=0.7)
+        ax.hist2d(x, y, bins=30, cmap=cmap, alpha=0.7)
     
     # Style the plot
     ax.set_xlim(0, map_size[0])
@@ -134,7 +170,7 @@ def generate_kde_heatmap(coords, event_type, map_size=(1000, 1000), output_name=
     if output_name:
         filename = f"{output_name}.png"
     else:
-        filename = f"heatmap_{event_type.lower()}.png"
+        filename = "heatmap_deaths.png"
     
     output_path = os.path.join(OUTPUT_DIR, filename)
     plt.savefig(output_path, transparent=True, bbox_inches='tight', pad_inches=0, dpi=150)
@@ -144,82 +180,109 @@ def generate_kde_heatmap(coords, event_type, map_size=(1000, 1000), output_name=
     return output_path
 
 
-def generate_combined_heatmap(map_size=(1000, 1000)):
-    """Generate a combined heatmap showing all death and danger zones."""
+def generate_zone_heatmaps(map_size=(1000, 1000)):
+    """Generate per-zone death heatmaps."""
+    zones = fetch_mapzones()
+    if not zones:
+        print("[WARNING] No map zones found in database")
+        return
     
-    # Fetch death and stealth broken events
-    deaths = fetch_events_by_type('PLAYER_DEATH')
-    stealth = fetch_events_by_type('STEALTH_BROKEN')
-    
-    all_danger = deaths + stealth
-    
-    if not all_danger:
-        print("[WARNING] No danger zone data found")
+    for zone in zones:
+        area_code = zone['area_code']
+        area_name = zone['area_name']
+        coords = fetch_deaths(area_code=area_code)
+        if coords and len(coords) >= 2:
+            zone_size = (zone['x_max'] - zone['x_min'], zone['y_max'] - zone['y_min'])
+            # Normalize coordinates relative to zone bounds
+            normalized = [(c[0] - zone['x_min'], c[1] - zone['y_min']) for c in coords]
+            generate_kde_heatmap(
+                normalized,
+                map_size=zone_size,
+                output_name=f"heatmap_zone_{area_code}_{area_name.lower().replace(' ', '_')}",
+                title=f"Deaths in {area_name}"
+            )
+        else:
+            print(f"[INFO] No death data for zone {area_name} (code={area_code})")
+
+
+def generate_death_cause_chart(area_code=None):
+    """Generate a bar chart of death causes."""
+    causes = fetch_death_causes(area_code=area_code)
+    if not causes:
+        print("[WARNING] No death cause data found")
         return None
     
-    x = np.array([c[0] for c in all_danger])
-    y = np.array([c[1] for c in all_danger])
+    labels = [c[0] for c in causes]
+    counts = [c[1] for c in causes]
     
-    # Weight deaths higher than stealth breaks
-    weights = np.array([2.0 if i < len(deaths) else 1.0 for i in range(len(all_danger))])
-    
-    fig, ax = plt.subplots(figsize=(12, 12))
-    fig.patch.set_alpha(0)
-    ax.patch.set_alpha(0)
-    
-    try:
-        xy = np.vstack([x, y])
-        kde = gaussian_kde(xy, weights=weights)
-        
-        xi, yi = np.mgrid[0:map_size[0]:200j, 0:map_size[1]:200j]
-        zi = kde(np.vstack([xi.flatten(), yi.flatten()]))
-        zi = zi.reshape(xi.shape)
-        zi = ndimage.gaussian_filter(zi, sigma=3)
-        
-        ax.pcolormesh(xi, yi, zi, shading='gouraud', cmap='hot', alpha=0.8)
-        
-        # Mark death locations with X
-        if deaths:
-            dx = [d[0] for d in deaths]
-            dy = [d[1] for d in deaths]
-            ax.scatter(dx, dy, marker='x', c='white', s=50, alpha=0.5)
-        
-    except Exception as e:
-        print(f"[WARNING] Combined heatmap generation failed: {e}")
-        ax.hist2d(x, y, bins=30, cmap='hot', alpha=0.8)
-    
-    ax.set_xlim(0, map_size[0])
-    ax.set_ylim(0, map_size[1])
-    ax.set_aspect('equal')
-    ax.axis('off')
+    fig, ax = plt.subplots(figsize=(10, 6))
+    bars = ax.barh(labels, counts, color='crimson', alpha=0.8)
+    ax.set_xlabel('Count')
+    ax.set_title('Death Causes' + (f' (Zone {area_code})' if area_code else ''))
+    ax.invert_yaxis()
     
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    output_path = os.path.join(OUTPUT_DIR, "heatmap_danger_zones.png")
-    plt.savefig(output_path, transparent=True, bbox_inches='tight', pad_inches=0, dpi=150)
+    suffix = f"_zone_{area_code}" if area_code else ""
+    output_path = os.path.join(OUTPUT_DIR, f"death_causes{suffix}.png")
+    plt.savefig(output_path, bbox_inches='tight', dpi=150)
     plt.close()
     
-    print(f"[SUCCESS] Combined danger zone heatmap saved to {output_path}")
+    print(f"[SUCCESS] Death cause chart saved to {output_path}")
     return output_path
 
 
-def generate_player_flow(map_size=(1000, 1000)):
-    """Generate a flow visualization showing player movement patterns."""
-    
-    # Use checkpoints and level completes to show intended paths
-    checkpoints = fetch_events_by_type('CHECKPOINT')
-    completes = fetch_events_by_type('LEVEL_COMPLETE')
-    
-    success_points = checkpoints + completes
-    
-    if not success_points or len(success_points) < 2:
-        print("[WARNING] Not enough flow data")
-        return None
-    
-    return generate_kde_heatmap(success_points, 'flow', map_size, 'heatmap_player_flow')
+def fetch_events(event_type=None, area_code=None, session_id=None):
+    """Fetch player event coordinates, optionally filtered."""
+    conn = connect_db()
+    if not conn or not conn.is_connected():
+        return []
+
+    try:
+        cursor = conn.cursor()
+
+        query = "SELECT event_x, event_y FROM playerevent WHERE event_x IS NOT NULL AND event_y IS NOT NULL"
+        params = []
+
+        if event_type is not None:
+            query += " AND event_type = %s"
+            params.append(event_type)
+        if area_code is not None:
+            query += " AND area_code = %s"
+            params.append(area_code)
+        if session_id is not None:
+            query += " AND session_id = %s"
+            params.append(session_id)
+
+        cursor.execute(query, tuple(params))
+        data = [(float(row[0]), float(row[1])) for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        return data
+    except mysql.connector.Error as err:
+        print(f"[ERROR] Fetching events: {err}")
+        return []
+
+
+def fetch_event_types():
+    """Fetch distinct event types from playerevent."""
+    conn = connect_db()
+    if not conn or not conn.is_connected():
+        return []
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT event_type FROM playerevent ORDER BY event_type")
+        types = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        return types
+    except mysql.connector.Error as err:
+        print(f"[ERROR] Fetching event types: {err}")
+        return []
 
 
 def get_stats():
-    """Print statistics about collected events."""
+    """Print statistics about collected data."""
     conn = connect_db()
     if not conn:
         return
@@ -231,27 +294,63 @@ def get_stats():
         print("  TELEMETRY STATISTICS")
         print("=" * 50)
         
-        # Total events
-        cursor.execute("SELECT COUNT(*) FROM events")
+        # Total deaths
+        cursor.execute("SELECT COUNT(*) FROM deathevent")
         total = cursor.fetchone()[0]
-        print(f"Total Events: {total}")
+        print(f"Total Deaths: {total}")
         
-        # Events by type
+        # Deaths by cause
         cursor.execute("""
-            SELECT event_type, COUNT(*) as count 
-            FROM events 
-            GROUP BY event_type 
+            SELECT death_cause, COUNT(*) as count 
+            FROM deathevent 
+            GROUP BY death_cause 
             ORDER BY count DESC
         """)
         
+        print("\nDeaths by Cause:")
+        for row in cursor.fetchall():
+            print(f"  {row[0]}: {row[1]}")
+        
+        # Deaths by zone
+        cursor.execute("""
+            SELECT m.area_name, COUNT(*) as count
+            FROM deathevent d
+            LEFT JOIN mapzone m ON d.area_code = m.area_code
+            GROUP BY d.area_code, m.area_name
+            ORDER BY count DESC
+        """)
+        
+        print("\nDeaths by Zone:")
+        for row in cursor.fetchall():
+            zone_name = row[0] if row[0] else 'Unknown'
+            print(f"  {zone_name}: {row[1]}")
+
+        # Total player events
+        cursor.execute("SELECT COUNT(*) FROM playerevent")
+        total_events = cursor.fetchone()[0]
+        print(f"\nTotal Player Events: {total_events}")
+
+        # Events by type
+        cursor.execute("""
+            SELECT event_type, COUNT(*) as count
+            FROM playerevent
+            GROUP BY event_type
+            ORDER BY count DESC
+        """)
+
         print("\nEvents by Type:")
         for row in cursor.fetchall():
             print(f"  {row[0]}: {row[1]}")
         
         # Sessions
-        cursor.execute("SELECT COUNT(*) FROM sessions")
+        cursor.execute("SELECT COUNT(*) FROM playersession")
         sessions = cursor.fetchone()[0]
         print(f"\nTotal Sessions: {sessions}")
+
+        # Players
+        cursor.execute("SELECT COUNT(*) FROM player")
+        players = cursor.fetchone()[0]
+        print(f"Total Players: {players}")
         
         cursor.close()
         conn.close()
@@ -263,9 +362,12 @@ def get_stats():
 
 def main():
     parser = argparse.ArgumentParser(description='Generate telemetry heatmaps')
-    parser.add_argument('--event', '-e', type=str, help='Event type to visualize')
-    parser.add_argument('--all', '-a', action='store_true', help='Generate all heatmaps')
-    parser.add_argument('--combined', '-c', action='store_true', help='Generate combined danger zone map')
+    parser.add_argument('--all', '-a', action='store_true', help='Generate all heatmaps (deaths + events + per-zone)')
+    parser.add_argument('--zone', '-z', type=int, help='Generate heatmap for a specific zone (area_code)')
+    parser.add_argument('--zones', action='store_true', help='Generate per-zone death heatmaps')
+    parser.add_argument('--causes', '-c', action='store_true', help='Generate death cause chart')
+    parser.add_argument('--event', '-e', type=str, help='Generate heatmap for a specific event type from playerevent')
+    parser.add_argument('--events', action='store_true', help='Generate heatmaps for all event types')
     parser.add_argument('--stats', '-s', action='store_true', help='Show statistics')
     parser.add_argument('--width', type=int, default=1000, help='Map width')
     parser.add_argument('--height', type=int, default=1000, help='Map height')
@@ -274,39 +376,70 @@ def main():
     map_size = (args.width, args.height)
     
     print("\n" + "=" * 50)
-    print("  HEATMAP GENERATOR - Visualizing Suffering")
+    print("  HEATMAP GENERATOR - Visualizing Telemetry")
     print("=" * 50 + "\n")
     
     if args.stats:
         get_stats()
         return
     
-    if args.combined:
-        generate_combined_heatmap(map_size)
+    if args.causes:
+        generate_death_cause_chart(area_code=args.zone)
         return
     
     if args.event:
-        if args.event.upper() in EVENT_TYPES:
-            coords = fetch_events_by_type(args.event.upper())
-            generate_kde_heatmap(coords, args.event.upper(), map_size)
-        else:
-            print(f"[ERROR] Unknown event type: {args.event}")
-            print(f"Available: {', '.join(EVENT_TYPES.keys())}")
+        coords = fetch_events(event_type=args.event)
+        generate_kde_heatmap(coords, map_size,
+                             output_name=f"heatmap_event_{args.event.lower()}",
+                             title=f"Event: {args.event}", cmap='Blues')
+        return
+    
+    if args.events:
+        event_types = fetch_event_types()
+        if not event_types:
+            print("[INFO] No player events found.")
+        for et in event_types:
+            coords = fetch_events(event_type=et)
+            if coords and len(coords) >= 2:
+                generate_kde_heatmap(coords, map_size,
+                                     output_name=f"heatmap_event_{et.lower()}",
+                                     title=f"Event: {et}", cmap='Blues')
+        return
+    
+    if args.zone is not None:
+        coords = fetch_deaths(area_code=args.zone)
+        generate_kde_heatmap(coords, map_size, output_name=f"heatmap_zone_{args.zone}",
+                             title=f"Deaths in Zone {args.zone}")
+        return
+    
+    if args.zones:
+        generate_zone_heatmaps(map_size)
         return
     
     if args.all:
-        for event_type in EVENT_TYPES.keys():
-            coords = fetch_events_by_type(event_type)
-            if coords:
-                generate_kde_heatmap(coords, event_type, map_size)
-        generate_combined_heatmap(map_size)
+        # Global death heatmap
+        coords = fetch_deaths()
+        if coords:
+            generate_kde_heatmap(coords, map_size)
+        # Per-zone heatmaps
+        generate_zone_heatmaps(map_size)
+        # Death cause chart
+        generate_death_cause_chart()
+        # All event type heatmaps
+        event_types = fetch_event_types()
+        for et in event_types:
+            coords = fetch_events(event_type=et)
+            if coords and len(coords) >= 2:
+                generate_kde_heatmap(coords, map_size,
+                                     output_name=f"heatmap_event_{et.lower()}",
+                                     title=f"Event: {et}", cmap='Blues')
         return
     
-    # Default: Generate death heatmap
+    # Default: Generate global death heatmap
     print("Generating death heatmap (use --help for more options)...")
-    coords = fetch_events_by_type('PLAYER_DEATH')
+    coords = fetch_deaths()
     if coords:
-        generate_kde_heatmap(coords, 'PLAYER_DEATH', map_size)
+        generate_kde_heatmap(coords, map_size)
     else:
         print("[INFO] No death events found. Play the game first!")
 
