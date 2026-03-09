@@ -21,7 +21,7 @@ The Overseer is a standalone, engine-agnostic telemetry suite designed to collec
 ├── backend/            # Python telemetry server (Overseer)
 ├── clients/
 │   └── java/           # Maven-compliant Java client implementation
-├── database/           # MySQL schema and storage logic
+├── database/           # MongoDB initialization and storage logic
 ├── visualizer/         # Spatial data analysis and heatmap generator
 └── requirements.txt    # Common Python dependencies
 ```
@@ -34,10 +34,8 @@ Centralize your settings in the root `.env` file. These variables are managed by
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
-| `DB_HOST` | Hostname of your MySQL server | `localhost` |
+| `MONGO_URI` | Connection string for MongoDB (Local or Atlas) | `mongodb+srv://...` |
 | `DB_NAME` | Name of the telemetry database | `telemetry_db` |
-| `DB_USER` | MySQL user with table permissions | `root` |
-| `DB_PASSWORD` | Password for your MySQL database | (Required) |
 | `SERVER_PORT` | Port the Overseer listens on | `8090` |
 | `VISUALIZER_OUTPUT_DIR` | Output directory for generated PNGs | `output` |
 | `VISUALIZER_DEFAULT_EVENT`| Default event type for visualization | `PLAYER_DEATH` |
@@ -62,15 +60,15 @@ pip install -r requirements.txt
 ```
 
 ### 2. Configuration
-Copy the template and fill in your MySQL credentials:
+Copy the template and fill in your MongoDB connection string in `.env`:
 ```powershell
 cp .env.example .env
 ```
 
 ### 3. Database Initialization
-Ensure MySQL is running and execute the schema:
+Ensure MongoDB is running (locally or on Atlas) and initialize collections/indexes:
 ```powershell
-mysql -u root -p < database/schema.sql
+python database/init_mongodb.py
 ```
 
 ### 4. Running the Backend
