@@ -100,12 +100,15 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
     def handle_session_start(self, data):
-        pid, sid_req = data.get('player_id'), data.get('save_id')
-        if not pid: return self.send_json_response(400, {'error': 'player_id required'})
+        # Support both 'player_id' and 'user_id' for legacy clients
+        pid = data.get('player_id') or data.get('user_id')
+        sid_req = data.get('save_id')
+        if not pid: return self.send_json_response(400, {'error': 'player_id or user_id required'})
         try:
             max_s = db.sessions.find_one(sort=[('session_id', -1)])
             sid = (max_s['session_id'] + 1) if max_s else 1
             db.sessions.insert_one({'session_id': sid, 'player_id': pid, 'save_id': sid_req, 'start_time': datetime.now()})
+            print(f"[OVERSEER] Session {sid} started for {pid}")
             self.send_json_response(200, {'status': 'session_started', 'session_id': sid})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
@@ -113,7 +116,9 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         sid = data.get('session_id')
         if not sid: return self.send_json_response(400, {'error': 'session_id required'})
         try:
-            db.sessions.update_one({'session_id': int(sid)}, {'': {'end_time': datetime.now()}})
+            # Fixed missing $set operator
+            db.sessions.update_one({'session_id': int(sid)}, {'$set': {'end_time': datetime.now()}})
+            print(f"[OVERSEER] Session {sid} ended")
             self.send_json_response(200, {'status': 'session_ended'})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
@@ -121,7 +126,8 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         pid, slot, pct = data.get('player_id'), data.get('slot_number', 1), data.get('completion_pct', 0.0)
         if not pid: return self.send_json_response(400, {'error': 'player_id required'})
         try:
-            db.savefiles.update_one({'player_id': pid, 'slot_number': slot}, {'': {'completion_pct': pct, 'last_updated': datetime.now()}}, upsert=True)
+            # Fixed missing $set operator
+            db.savefiles.update_one({'player_id': pid, 'slot_number': slot}, {'$set': {'completion_pct': pct, 'last_updated': datetime.now()}}, upsert=True)
             self.send_json_response(200, {'status': 'save_synced'})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
