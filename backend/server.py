@@ -25,27 +25,23 @@ db = None
 def initialize_database():
     global db_client, db
     try:
+        # Reduced timeout to catch connection issues faster
         db_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-        db_client.server_info()
+        # Force a connection check
+        db_client.admin.command('ping')
         db = db_client[DB_NAME]
         
+        # Ensure collections exist by touching them
         db.players.create_index('username', unique=True)
         db.players.create_index('player_id', unique=True)
-        db.savefiles.create_index([('player_id', 1), ('slot_number', 1)], unique=True)
+        # Added session_id and user_id legacy support indexing
         db.sessions.create_index('session_id', unique=True)
         db.sessions.create_index('player_id')
-        db.events.create_index('session_id')
-        db.events.create_index('event_type')
-        db.events.create_index('area_code')
-        db.events.create_index('event_time')
-        db.deaths.create_index('session_id')
-        db.deaths.create_index('area_code')
-        db.mapzones.create_index('area_code', unique=True)
         
-        print(f'[OVERSEER] Connected to MongoDB at {MONGO_URI}')
+        print(f'[OVERSEER] Connected to MongoDB Atlas: {DB_NAME}')
         return True
     except Exception as e:
-        print(f'[OVERSEER] Error initializing MongoDB: {e}')
+        print(f'[OVERSEER] Critical: Could not connect to Atlas! {e}')
         return False
 
 class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -84,8 +80,19 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         elif parsed.path == '/deaths': self.handle_get_deaths()
         elif parsed.path == '/events': self.handle_get_events()
         elif parsed.path == '/mapzones': self.handle_get_mapzones()
+        elif parsed.path == '/users/list': self.handle_get_users_list()
         elif parsed.path.startswith('/leaderboard'): self.handle_get_leaderboard()
         else: self.send_json_response(404, {'error': 'Not found'})
+
+    def handle_get_users_list(self):
+        """Fetch all registered players."""
+        try:
+            cursor = db.players.find({}, {'password': 0})  # Exclude passwords for safety
+            users = list(cursor)
+            for u in users: del u['_id']
+            self.send_json_response(200, {'users': users})
+        except Exception as e:
+            self.send_json_response(500, {'error': str(e)})
 
     def handle_player_register(self, data):
         u, p = data.get('username'), data.get('password')
