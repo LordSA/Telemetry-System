@@ -11,8 +11,11 @@ load_dotenv(BASE_DIR / ".env")
 # ============================================================================
 # DATABASE SETTINGS
 # ============================================================================
-DB_HOST = os.getenv('DB_HOST', 'localhost')
+MONGO_URI = os.getenv('MONGO_URI', 'mongodb://localhost:27017/')
 DB_NAME = os.getenv('DB_NAME', 'telemetry_db')
+
+# Legacy SQL settings (can be removed later)
+DB_HOST = os.getenv('DB_HOST', 'localhost')
 DB_USER = os.getenv('DB_USER', 'root')
 DB_PASSWORD = os.getenv('DB_PASSWORD', '')
 
