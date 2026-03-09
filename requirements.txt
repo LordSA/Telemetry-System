@@ -1,5 +1,6 @@
 matplotlib>=3.3.0
 numpy>=1.19.0
 scipy>=1.7.0
-pymongo[srv]==3.12
+pymongo[srv]>=4.0.0
+dnspython>=2.0.0
 python-dotenv>=1.0.0
