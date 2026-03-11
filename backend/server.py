@@ -80,7 +80,9 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/session/start': self.handle_session_start(data)
         elif self.path == '/session/end': self.handle_session_end(data)
         elif self.path == '/death': self.handle_death_event(data)
+        elif self.path == '/death/batch': self.handle_death_batch(data)
         elif self.path == '/event': self.handle_player_event(data)
+        elif self.path == '/event/batch': self.handle_event_batch(data)
         elif self.path == '/save/upload': self.handle_save_upload(data)
         else: self.send_json_response(404, {'error': 'Not found'})
 
@@ -139,16 +141,58 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         sid = data.get('session_id')
         if not sid: return self.send_json_response(400, {'error': 'session_id required'})
         try:
-            db.deaths.insert_one({'session_id': int(sid), 'x': data.get('x'), 'y': data.get('y'), 'cause': data.get('cause'), 'time': datetime.now()})
+            db.deaths.insert_one({'session_id': int(sid), 'x': data.get('death_x') or data.get('x'), 'y': data.get('death_y') or data.get('y'), 'cause': data.get('death_cause') or data.get('cause'), 'time': datetime.now()})
             self.send_json_response(200, {'status': 'death_recorded'})
+        except Exception as e: self.send_json_response(500, {'error': str(e)})
+
+    def handle_death_batch(self, data):
+        if not isinstance(data, list): return self.send_json_response(400, {'error': 'List expected'})
+        try:
+            for item in data:
+                sid = item.get('session_id')
+                if sid:
+                    db.deaths.insert_one({
+                        'session_id': int(sid),
+                        'x': item.get('death_x') or item.get('x'),
+                        'y': item.get('death_y') or item.get('y'),
+                        'cause': item.get('death_cause') or item.get('cause'),
+                        'time': datetime.now()
+                    })
+            self.send_json_response(200, {'status': 'batch_deaths_recorded'})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
     def handle_player_event(self, data):
         sid, et = data.get('session_id'), data.get('event_type')
         if not sid or not et: return self.send_json_response(400, {'error': 'Missing fields'})
         try:
-            db.events.insert_one({'session_id': int(sid), 'event_type': et, 'event_time': datetime.now()})
+            db.events.insert_one({
+                'session_id': int(sid),
+                'event_type': et,
+                'x': data.get('event_x'),
+                'y': data.get('event_y'),
+                'value': data.get('event_value'),
+                'area_code': data.get('area_code'),
+                'event_time': datetime.now()
+            })
             self.send_json_response(200, {'status': 'event_recorded'})
+        except Exception as e: self.send_json_response(500, {'error': str(e)})
+
+    def handle_event_batch(self, data):
+        if not isinstance(data, list): return self.send_json_response(400, {'error': 'List expected'})
+        try:
+            for item in data:
+                sid, et = item.get('session_id'), item.get('event_type')
+                if sid and et:
+                    db.events.insert_one({
+                        'session_id': int(sid),
+                        'event_type': et,
+                        'x': item.get('event_x'),
+                        'y': item.get('event_y'),
+                        'value': item.get('event_value'),
+                        'area_code': item.get('area_code'),
+                        'event_time': datetime.now()
+                    })
+            self.send_json_response(200, {'status': 'batch_events_recorded'})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
     def handle_get_leaderboard(self):
