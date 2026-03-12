@@ -104,10 +104,13 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         if not u: return self.send_json_response(400, {'error': 'Missing username'})
         try:
             player = db.players.find_one({'username': u})
-            if player: return self.send_json_response(200, {'status': 'exists', 'player_id': player['player_id']})
+            if player:
+                print(f"[DEBUG] [players] Player already exists: id={player['player_id']}, username='{u}'")
+                return self.send_json_response(200, {'status': 'exists', 'player_id': player['player_id']})
             max_p = db.players.find_one(sort=[('player_id', -1)])
             pid = (max_p['player_id'] + 1) if max_p else 1
             db.players.insert_one({'player_id': pid, 'username': u, 'password': p, 'created_at': datetime.now()})
+            print(f"[DEBUG] [players] Registered new player: id={pid}, username='{u}'")
             self.send_json_response(200, {'status': 'registered', 'player_id': pid})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
@@ -127,6 +130,7 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
             if save_id is not None:
                 session_doc['save_id'] = int(save_id)
             db.sessions.insert_one(session_doc)
+            print(f"[DEBUG] [sessions] Session started: session_id={sid}, player_id={pid}, save_id={save_id}")
             self.send_json_response(200, {'status': 'session_started', 'session_id': sid})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
@@ -135,6 +139,7 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         if not sid: return self.send_json_response(400, {'error': 'session_id required'})
         try:
             db.sessions.update_one({'session_id': int(sid)}, {'$set': {'end_time': datetime.now()}})
+            print(f"[DEBUG] [sessions] Session ended: session_id={sid}")
             self.send_json_response(200, {'status': 'session_ended'})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
@@ -167,6 +172,7 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
             else:
                 save_id = result['save_id']
             
+            print(f"[DEBUG] [savefiles] Save synced: player_id={pid}, slot={slot_number}, completion={completion_pct}%, save_id={save_id}")
             self.send_json_response(200, {'status': 'save_synced', 'save_id': save_id})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
@@ -186,6 +192,7 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
             if area_code is not None:
                 death_doc['area_code'] = int(area_code)
             db.deaths.insert_one(death_doc)
+            print(f"[DEBUG] [deaths] Death recorded: session_id={sid}, cause={death_doc.get('cause')}, pos=({death_doc.get('x')}, {death_doc.get('y')}), area_code={death_doc.get('area_code', 'N/A')}")
             self.send_json_response(200, {'status': 'death_recorded'})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
@@ -206,6 +213,8 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
                     if area_code is not None:
                         death_doc['area_code'] = int(area_code)
                     db.deaths.insert_one(death_doc)
+                    print(f"[DEBUG] [deaths] Batch death: session_id={sid}, cause={death_doc.get('cause')}, pos=({death_doc.get('x')}, {death_doc.get('y')}), area_code={death_doc.get('area_code', 'N/A')}")
+            print(f"[DEBUG] [deaths] Batch complete: {len(data)} death(s) processed")
             self.send_json_response(200, {'status': 'batch_deaths_recorded'})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
@@ -213,7 +222,7 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         sid, et = data.get('session_id'), data.get('event_type')
         if not sid or not et: return self.send_json_response(400, {'error': 'Missing fields'})
         try:
-            db.events.insert_one({
+            event_doc = {
                 'session_id': int(sid),
                 'event_type': et,
                 'x': data.get('event_x'),
@@ -221,7 +230,9 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
                 'value': data.get('event_value'),
                 'area_code': data.get('area_code'),
                 'event_time': datetime.now()
-            })
+            }
+            db.events.insert_one(event_doc)
+            print(f"[DEBUG] [events] Event recorded: session_id={sid}, type={et}, pos=({event_doc.get('x')}, {event_doc.get('y')}), value={event_doc.get('value')}, area_code={event_doc.get('area_code', 'N/A')}")
             self.send_json_response(200, {'status': 'event_recorded'})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
@@ -231,7 +242,7 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
             for item in data:
                 sid, et = item.get('session_id'), item.get('event_type')
                 if sid and et:
-                    db.events.insert_one({
+                    event_doc = {
                         'session_id': int(sid),
                         'event_type': et,
                         'x': item.get('event_x'),
@@ -239,7 +250,10 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
                         'value': item.get('event_value'),
                         'area_code': item.get('area_code'),
                         'event_time': datetime.now()
-                    })
+                    }
+                    db.events.insert_one(event_doc)
+                    print(f"[DEBUG] [events] Batch event: session_id={sid}, type={et}, pos=({event_doc.get('x')}, {event_doc.get('y')}), value={event_doc.get('value')}")
+            print(f"[DEBUG] [events] Batch complete: {len(data)} event(s) processed")
             self.send_json_response(200, {'status': 'batch_events_recorded'})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
