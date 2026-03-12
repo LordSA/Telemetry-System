@@ -100,8 +100,8 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
     def handle_player_register(self, data):
-        u, p = data.get('username'), data.get('password')
-        if not u or not p: return self.send_json_response(400, {'error': 'Missing fields'})
+        u, p = data.get('username'), data.get('password', '')
+        if not u: return self.send_json_response(400, {'error': 'Missing username'})
         try:
             player = db.players.find_one({'username': u})
             if player: return self.send_json_response(200, {'status': 'exists', 'player_id': player['player_id']})
@@ -117,7 +117,16 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         try:
             max_s = db.sessions.find_one(sort=[('session_id', -1)])
             sid = (max_s['session_id'] + 1) if max_s else 1
-            db.sessions.insert_one({'session_id': sid, 'player_id': pid, 'start_time': datetime.now()})
+            session_doc = {
+                'session_id': sid,
+                'player_id': pid,
+                'start_time': datetime.now()
+            }
+            # Include save_id if the game client provides it
+            save_id = data.get('save_id')
+            if save_id is not None:
+                session_doc['save_id'] = int(save_id)
+            db.sessions.insert_one(session_doc)
             self.send_json_response(200, {'status': 'session_started', 'session_id': sid})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
@@ -133,15 +142,50 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         pid = data.get('player_id')
         if not pid: return self.send_json_response(400, {'error': 'player_id required'})
         try:
-            db.savefiles.update_one({'player_id': pid}, {'$set': {'data': data.get('save_data'), 'last_updated': datetime.now()}}, upsert=True)
-            self.send_json_response(200, {'status': 'save_synced'})
+            slot_number = data.get('slot_number', 0)
+            completion_pct = data.get('completion_pct', 0.0)
+            
+            # Upsert by player_id + slot_number
+            result = db.savefiles.find_one_and_update(
+                {'player_id': int(pid), 'slot_number': int(slot_number)},
+                {'$set': {
+                    'completion_pct': float(completion_pct),
+                    'save_data': data.get('save_data'),
+                    'last_updated': datetime.now()
+                }},
+                upsert=True,
+                return_document=pymongo.ReturnDocument.AFTER
+            )
+            
+            # Generate a save_id for the game client
+            # Use the existing save_id if present, otherwise assign one
+            if 'save_id' not in result:
+                max_save = db.savefiles.find_one(sort=[('save_id', -1)])
+                new_save_id = (max_save['save_id'] + 1) if (max_save and 'save_id' in max_save) else 1
+                db.savefiles.update_one({'_id': result['_id']}, {'$set': {'save_id': new_save_id}})
+                save_id = new_save_id
+            else:
+                save_id = result['save_id']
+            
+            self.send_json_response(200, {'status': 'save_synced', 'save_id': save_id})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
     def handle_death_event(self, data):
         sid = data.get('session_id')
         if not sid: return self.send_json_response(400, {'error': 'session_id required'})
         try:
-            db.deaths.insert_one({'session_id': int(sid), 'x': data.get('death_x') or data.get('x'), 'y': data.get('death_y') or data.get('y'), 'cause': data.get('death_cause') or data.get('cause'), 'time': datetime.now()})
+            death_doc = {
+                'session_id': int(sid),
+                'x': data.get('death_x') or data.get('x'),
+                'y': data.get('death_y') or data.get('y'),
+                'cause': data.get('death_cause') or data.get('cause'),
+                'time': datetime.now()
+            }
+            # Include area_code if provided by the game client
+            area_code = data.get('area_code')
+            if area_code is not None:
+                death_doc['area_code'] = int(area_code)
+            db.deaths.insert_one(death_doc)
             self.send_json_response(200, {'status': 'death_recorded'})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 
@@ -151,13 +195,17 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
             for item in data:
                 sid = item.get('session_id')
                 if sid:
-                    db.deaths.insert_one({
+                    death_doc = {
                         'session_id': int(sid),
                         'x': item.get('death_x') or item.get('x'),
                         'y': item.get('death_y') or item.get('y'),
                         'cause': item.get('death_cause') or item.get('cause'),
                         'time': datetime.now()
-                    })
+                    }
+                    area_code = item.get('area_code')
+                    if area_code is not None:
+                        death_doc['area_code'] = int(area_code)
+                    db.deaths.insert_one(death_doc)
             self.send_json_response(200, {'status': 'batch_deaths_recorded'})
         except Exception as e: self.send_json_response(500, {'error': str(e)})
 

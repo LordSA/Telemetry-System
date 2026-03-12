@@ -14,7 +14,7 @@ def migrate_to_mongodb():
     print("=" * 50)
     
     try:
-        client = MongoClient(var.MONGO_URI, serverSelectionTimeoutMS=5000)
+        client = MongoClient(var.MONGO_URI, serverSelectionTimeoutMS=30000, socketTimeoutMS=30000)
         client.server_info()
         db = client[var.DB_NAME]
         
@@ -23,29 +23,37 @@ def migrate_to_mongodb():
         # 1. Setup Collections and Indexes
         print("Setting up collections and indexes...")
         
+        def safe_create_index(collection, keys, **kwargs):
+            """Create an index, ignoring errors if it already exists."""
+            try:
+                db[collection].create_index(keys, **kwargs)
+                print(f"  [OK] {collection}: index on {keys}")
+            except Exception as e:
+                print(f"  [SKIP] {collection}: index on {keys} — {e}")
+        
         # Players
-        db.players.create_index("username", unique=True)
-        db.players.create_index("player_id", unique=True)
+        safe_create_index("players", "username", unique=True)
+        safe_create_index("players", "player_id", unique=True)
         
         # Savefiles
-        db.savefiles.create_index([("player_id", 1), ("slot_number", 1)], unique=True)
+        safe_create_index("savefiles", [("player_id", 1), ("slot_number", 1)], unique=True)
         
         # Sessions
-        db.sessions.create_index("session_id", unique=True)
-        db.sessions.create_index("player_id")
+        safe_create_index("sessions", "session_id", unique=True)
+        safe_create_index("sessions", "player_id")
         
         # Events
-        db.events.create_index("session_id")
-        db.events.create_index("event_type")
-        db.events.create_index("area_code")
-        db.events.create_index("event_time")
+        safe_create_index("events", "session_id")
+        safe_create_index("events", "event_type")
+        safe_create_index("events", "area_code")
+        safe_create_index("events", "event_time")
         
         # Deaths
-        db.deaths.create_index("session_id")
-        db.deaths.create_index("area_code")
+        safe_create_index("deaths", "session_id")
+        safe_create_index("deaths", "area_code")
         
         # Mapzones
-        db.mapzones.create_index("area_code", unique=True)
+        safe_create_index("mapzones", "area_code", unique=True)
         
         print(f"Database '{var.DB_NAME}' initialization complete.")
         return True

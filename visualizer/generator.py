@@ -1,4 +1,5 @@
-import mysql.connector
+import pymongo
+from pymongo import MongoClient
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import ndimage
@@ -13,95 +14,91 @@ import var
 
 OUTPUT_DIR = var.VISUALIZER_OUTPUT_DIR
 
-# Database Configuration from common var.py
-DB_CONFIG = var.DB_CONFIG
+# MongoDB Configuration from common var.py
+MONGO_URI = var.MONGO_URI
+DB_NAME = var.DB_NAME
+
+_client = None
+_db = None
 
 
 def connect_db():
-    """Connect to the MySQL database."""
+    """Connect to the MongoDB database."""
+    global _client, _db
     try:
-        return mysql.connector.connect(**DB_CONFIG)
-    except mysql.connector.Error as err:
-        print(f"[ERROR] Connecting to MySQL: {err}")
+        if _client is None:
+            _client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+            _client.admin.command('ping')
+            _db = _client[DB_NAME]
+            print(f"[INFO] Connected to MongoDB: {DB_NAME}")
+        return _db
+    except Exception as e:
+        print(f"[ERROR] Connecting to MongoDB: {e}")
         return None
 
 
 def fetch_deaths(area_code=None, session_id=None):
     """Fetch death coordinates, optionally filtered by area or session."""
-    conn = connect_db()
-    if not conn or not conn.is_connected():
+    db = connect_db()
+    if db is None:
         return []
-    
+
     try:
-        cursor = conn.cursor()
-        
-        query = "SELECT death_x, death_y FROM deathevent WHERE 1=1"
-        params = []
-
+        query = {}
         if area_code is not None:
-            query += " AND area_code = %s"
-            params.append(area_code)
+            query['area_code'] = int(area_code)
         if session_id is not None:
-            query += " AND session_id = %s"
-            params.append(session_id)
+            query['session_id'] = int(session_id)
 
-        cursor.execute(query, tuple(params))
-        data = [(float(row[0]), float(row[1])) for row in cursor.fetchall()]
-        cursor.close()
-        conn.close()
+        deaths = db.deaths.find(query, {'x': 1, 'y': 1, '_id': 0})
+        data = [(float(d['x']), float(d['y'])) for d in deaths if d.get('x') is not None and d.get('y') is not None]
         return data
-    except mysql.connector.Error as err:
-        print(f"[ERROR] Fetching deaths: {err}")
+    except Exception as e:
+        print(f"[ERROR] Fetching deaths: {e}")
         return []
 
 
 def fetch_death_causes(area_code=None):
     """Fetch death cause distribution."""
-    conn = connect_db()
-    if not conn or not conn.is_connected():
+    db = connect_db()
+    if db is None:
         return []
-    
+
     try:
-        cursor = conn.cursor()
-        
+        match_stage = {}
         if area_code is not None:
-            cursor.execute(
-                "SELECT death_cause, COUNT(*) as cnt FROM deathevent WHERE area_code=%s GROUP BY death_cause ORDER BY cnt DESC",
-                (area_code,)
-            )
-        else:
-            cursor.execute(
-                "SELECT death_cause, COUNT(*) as cnt FROM deathevent GROUP BY death_cause ORDER BY cnt DESC"
-            )
-        
-        data = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return data
-    except mysql.connector.Error as err:
-        print(f"[ERROR] Fetching death causes: {err}")
+            match_stage['area_code'] = int(area_code)
+
+        pipeline = []
+        if match_stage:
+            pipeline.append({'$match': match_stage})
+        pipeline.extend([
+            {'$group': {'_id': '$cause', 'count': {'$sum': 1}}},
+            {'$sort': {'count': -1}}
+        ])
+
+        results = list(db.deaths.aggregate(pipeline))
+        return [(r['_id'], r['count']) for r in results if r['_id'] is not None]
+    except Exception as e:
+        print(f"[ERROR] Fetching death causes: {e}")
         return []
 
 
 def fetch_mapzones():
     """Fetch all map zones for overlay context."""
-    conn = connect_db()
-    if not conn or not conn.is_connected():
+    db = connect_db()
+    if db is None:
         return []
-    
+
     try:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT area_code, area_name, x_min, y_min, x_max, y_max FROM mapzone")
-        zones = cursor.fetchall()
-        # Convert Decimal to float
+        zones = list(db.mapzones.find({}, {'_id': 0}))
         for z in zones:
             for key in ('x_min', 'y_min', 'x_max', 'y_max'):
-                z[key] = float(z[key])
-        cursor.close()
-        conn.close()
+                if key in z:
+                    z[key] = float(z[key])
         return zones
-    except mysql.connector.Error as err:
-        print(f"[ERROR] Fetching map zones: {err}")
+    except Exception as e:
+        print(f"[ERROR] Fetching map zones: {e}")
         return []
 
 
@@ -186,10 +183,10 @@ def generate_zone_heatmaps(map_size=(1000, 1000)):
     if not zones:
         print("[WARNING] No map zones found in database")
         return
-    
+
     for zone in zones:
-        area_code = zone['area_code']
-        area_name = zone['area_name']
+        area_code = zone.get('area_code')
+        area_name = zone.get('zone_name') or zone.get('area_name') or f'zone_{area_code}'
         coords = fetch_deaths(area_code=area_code)
         if coords and len(coords) >= 2:
             zone_size = (zone['x_max'] - zone['x_min'], zone['y_max'] - zone['y_min'])
@@ -233,131 +230,107 @@ def generate_death_cause_chart(area_code=None):
 
 def fetch_events(event_type=None, area_code=None, session_id=None):
     """Fetch player event coordinates, optionally filtered."""
-    conn = connect_db()
-    if not conn or not conn.is_connected():
+    db = connect_db()
+    if db is None:
         return []
 
     try:
-        cursor = conn.cursor()
-
-        query = "SELECT event_x, event_y FROM playerevent WHERE event_x IS NOT NULL AND event_y IS NOT NULL"
-        params = []
-
+        query = {'x': {'$ne': None}, 'y': {'$ne': None}}
         if event_type is not None:
-            query += " AND event_type = %s"
-            params.append(event_type)
+            query['event_type'] = event_type
         if area_code is not None:
-            query += " AND area_code = %s"
-            params.append(area_code)
+            query['area_code'] = int(area_code)
         if session_id is not None:
-            query += " AND session_id = %s"
-            params.append(session_id)
+            query['session_id'] = int(session_id)
 
-        cursor.execute(query, tuple(params))
-        data = [(float(row[0]), float(row[1])) for row in cursor.fetchall()]
-        cursor.close()
-        conn.close()
+        events = db.events.find(query, {'x': 1, 'y': 1, '_id': 0})
+        data = [(float(e['x']), float(e['y'])) for e in events if e.get('x') is not None and e.get('y') is not None]
         return data
-    except mysql.connector.Error as err:
-        print(f"[ERROR] Fetching events: {err}")
+    except Exception as e:
+        print(f"[ERROR] Fetching events: {e}")
         return []
 
 
 def fetch_event_types():
-    """Fetch distinct event types from playerevent."""
-    conn = connect_db()
-    if not conn or not conn.is_connected():
+    """Fetch distinct event types from player events."""
+    db = connect_db()
+    if db is None:
         return []
 
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT event_type FROM playerevent ORDER BY event_type")
-        types = [row[0] for row in cursor.fetchall()]
-        cursor.close()
-        conn.close()
-        return types
-    except mysql.connector.Error as err:
-        print(f"[ERROR] Fetching event types: {err}")
+        types = db.events.distinct('event_type')
+        return sorted([t for t in types if t is not None])
+    except Exception as e:
+        print(f"[ERROR] Fetching event types: {e}")
         return []
 
 
 def get_stats():
     """Print statistics about collected data."""
-    conn = connect_db()
-    if not conn:
+    db = connect_db()
+    if db is None:
         return
-    
+
     try:
-        cursor = conn.cursor()
-        
         print("\n" + "=" * 50)
         print("  TELEMETRY STATISTICS")
         print("=" * 50)
-        
+
         # Total deaths
-        cursor.execute("SELECT COUNT(*) FROM deathevent")
-        total = cursor.fetchone()[0]
-        print(f"Total Deaths: {total}")
-        
+        total_deaths = db.deaths.count_documents({})
+        print(f"Total Deaths: {total_deaths}")
+
         # Deaths by cause
-        cursor.execute("""
-            SELECT death_cause, COUNT(*) as count 
-            FROM deathevent 
-            GROUP BY death_cause 
-            ORDER BY count DESC
-        """)
-        
+        cause_pipeline = [
+            {'$group': {'_id': '$cause', 'count': {'$sum': 1}}},
+            {'$sort': {'count': -1}}
+        ]
+        causes = list(db.deaths.aggregate(cause_pipeline))
         print("\nDeaths by Cause:")
-        for row in cursor.fetchall():
-            print(f"  {row[0]}: {row[1]}")
-        
-        # Deaths by zone
-        cursor.execute("""
-            SELECT m.area_name, COUNT(*) as count
-            FROM deathevent d
-            LEFT JOIN mapzone m ON d.area_code = m.area_code
-            GROUP BY d.area_code, m.area_name
-            ORDER BY count DESC
-        """)
-        
+        for c in causes:
+            cause_name = c['_id'] if c['_id'] else 'Unknown'
+            print(f"  {cause_name}: {c['count']}")
+
+        # Deaths by zone (area_code)
+        zone_pipeline = [
+            {'$group': {'_id': '$area_code', 'count': {'$sum': 1}}},
+            {'$sort': {'count': -1}}
+        ]
+        zones = list(db.deaths.aggregate(zone_pipeline))
         print("\nDeaths by Zone:")
-        for row in cursor.fetchall():
-            zone_name = row[0] if row[0] else 'Unknown'
-            print(f"  {zone_name}: {row[1]}")
+        for z in zones:
+            zone_name = f"Zone {z['_id']}" if z['_id'] is not None else 'Unknown'
+            zone_doc = db.mapzones.find_one({'area_code': z['_id']})
+            if zone_doc:
+                zone_name = zone_doc.get('zone_name', zone_name)
+            print(f"  {zone_name}: {z['count']}")
 
         # Total player events
-        cursor.execute("SELECT COUNT(*) FROM playerevent")
-        total_events = cursor.fetchone()[0]
+        total_events = db.events.count_documents({})
         print(f"\nTotal Player Events: {total_events}")
 
         # Events by type
-        cursor.execute("""
-            SELECT event_type, COUNT(*) as count
-            FROM playerevent
-            GROUP BY event_type
-            ORDER BY count DESC
-        """)
-
+        event_pipeline = [
+            {'$group': {'_id': '$event_type', 'count': {'$sum': 1}}},
+            {'$sort': {'count': -1}}
+        ]
+        event_types = list(db.events.aggregate(event_pipeline))
         print("\nEvents by Type:")
-        for row in cursor.fetchall():
-            print(f"  {row[0]}: {row[1]}")
-        
+        for et in event_types:
+            print(f"  {et['_id']}: {et['count']}")
+
         # Sessions
-        cursor.execute("SELECT COUNT(*) FROM playersession")
-        sessions = cursor.fetchone()[0]
-        print(f"\nTotal Sessions: {sessions}")
+        total_sessions = db.sessions.count_documents({})
+        print(f"\nTotal Sessions: {total_sessions}")
 
         # Players
-        cursor.execute("SELECT COUNT(*) FROM player")
-        players = cursor.fetchone()[0]
-        print(f"Total Players: {players}")
-        
-        cursor.close()
-        conn.close()
+        total_players = db.players.count_documents({})
+        print(f"Total Players: {total_players}")
+
         print("=" * 50 + "\n")
-        
-    except mysql.connector.Error as err:
-        print(f"[ERROR] Getting stats: {err}")
+
+    except Exception as e:
+        print(f"[ERROR] Getting stats: {e}")
 
 
 def main():
